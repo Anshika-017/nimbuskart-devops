@@ -9,17 +9,6 @@ jobs:
   cost-janitor:
     runs-on: ubuntu-latest
 
-    services:
-      localstack:
-        image: localstack/localstack:3.0.0
-        ports:
-          - 4566:4566
-        options: >-
-          --health-cmd "curl -f http://localhost:4566/_localstack/health || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -30,37 +19,42 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python dependencies
-        run: pip install -r janitor/requirements.txt
+        run: |
+          pip install boto3 awscli-local terraform-local
+          pip install -r janitor/requirements.txt
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.5.0"
 
-      - name: Install tflocal
-        run: pip install terraform-local
-
-      - name: Wait for LocalStack
+      - name: Start LocalStack
         run: |
-          echo "Waiting for LocalStack to be ready..."
+          pip install localstack
+          docker pull localstack/localstack:3.0.0
+          docker run -d -p 4566:4566 --name localstack localstack/localstack:3.0.0
+          echo "Waiting for LocalStack..."
           for i in {1..30}; do
             if curl -s http://localhost:4566/_localstack/health | grep -q "running"; then
               echo "LocalStack is ready!"
               break
             fi
-            echo "Attempt $i: LocalStack not ready yet, waiting..."
+            echo "Attempt $i: not ready yet..."
             sleep 10
           done
           curl -s http://localhost:4566/_localstack/health
 
       - name: Terraform Init and Apply
         working-directory: terraform
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
         run: |
           tflocal init
           tflocal apply -auto-approve
 
       - name: Run Cost Janitor
-        id: janitor
         working-directory: janitor
         run: |
           python3 janitor.py --dry-run --output report.json || echo "ORPHANS_FOUND=true" >> $GITHUB_ENV
@@ -82,7 +76,7 @@ jobs:
           lines.append(f"- **Estimated Monthly Waste:** ${report['summary']['estimated_monthly_waste_usd']}")
           lines.append("## Findings")
           for f in report["findings"]:
-              lines.append(f"### {f['resource_type']} — {f['resource_id']}")
+              lines.append(f"### {f['resource_type']} - {f['resource_id']}")
               lines.append(f"- **Reason:** {f['reason']}")
               lines.append(f"- **Age:** {f['age_days']} days")
               lines.append(f"- **Monthly Cost:** ${f['estimated_monthly_cost_usd']}")
