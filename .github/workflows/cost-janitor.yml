@@ -43,10 +43,15 @@ jobs:
       - name: Wait for LocalStack
         run: |
           echo "Waiting for LocalStack to be ready..."
-          for i in {1..20}; do
-            curl -s http://localhost:4566/_localstack/health && break
-            sleep 5
+          for i in {1..30}; do
+            if curl -s http://localhost:4566/_localstack/health | grep -q "running"; then
+              echo "LocalStack is ready!"
+              break
+            fi
+            echo "Attempt $i: LocalStack not ready yet, waiting..."
+            sleep 10
           done
+          curl -s http://localhost:4566/_localstack/health
 
       - name: Terraform Init and Apply
         working-directory: terraform
