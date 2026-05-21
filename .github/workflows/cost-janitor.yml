@@ -1,0 +1,110 @@
+name: Cost Janitor CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  cost-janitor:
+    runs-on: ubuntu-latest
+
+    services:
+      localstack:
+        image: localstack/localstack:3.0.0
+        ports:
+          - 4566:4566
+        options: >-
+          --health-cmd "curl -f http://localhost:4566/_localstack/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r janitor/requirements.txt
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0"
+
+      - name: Install tflocal
+        run: pip install terraform-local
+
+      - name: Wait for LocalStack
+        run: |
+          echo "Waiting for LocalStack to be ready..."
+          for i in {1..20}; do
+            curl -s http://localhost:4566/_localstack/health && break
+            sleep 5
+          done
+
+      - name: Terraform Init and Apply
+        working-directory: terraform
+        run: |
+          tflocal init
+          tflocal apply -auto-approve
+
+      - name: Run Cost Janitor
+        id: janitor
+        working-directory: janitor
+        run: |
+          python3 janitor.py --dry-run --output report.json || echo "ORPHANS_FOUND=true" >> $GITHUB_ENV
+
+      - name: Generate Markdown Summary
+        working-directory: janitor
+        run: |
+          python3 << EOF
+          import json
+          with open("report.json") as f:
+              report = json.load(f)
+          lines = []
+          lines.append("# Cost Janitor Report")
+          lines.append(f"**Scan Time:** {report['scan_timestamp']}")
+          lines.append(f"**Account:** {report['account_id']}")
+          lines.append(f"**Region:** {report['region']}")
+          lines.append("## Summary")
+          lines.append(f"- **Total Orphans:** {report['summary']['total_orphans']}")
+          lines.append(f"- **Estimated Monthly Waste:** ${report['summary']['estimated_monthly_waste_usd']}")
+          lines.append("## Findings")
+          for f in report["findings"]:
+              lines.append(f"### {f['resource_type']} — {f['resource_id']}")
+              lines.append(f"- **Reason:** {f['reason']}")
+              lines.append(f"- **Age:** {f['age_days']} days")
+              lines.append(f"- **Monthly Cost:** ${f['estimated_monthly_cost_usd']}")
+              lines.append(f"- **Suggested Action:** {f['suggested_action']}")
+          with open("summary.md", "w") as f:
+              f.write("\n".join(lines))
+          print("Summary generated!")
+          EOF
+
+      - name: Upload report artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cost-janitor-report
+          path: |
+            janitor/report.json
+            janitor/summary.md
+
+      - name: Post PR comment if orphans found
+        if: github.event_name == 'pull_request' && env.ORPHANS_FOUND == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const summary = fs.readFileSync("janitor/summary.md", "utf8");
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
